@@ -192,6 +192,7 @@ export function renderTurn(
   includeThinking: boolean,
   includeTools: boolean,
   prevTimestamp?: string,
+  assistantLabel: string = "Claude",
 ): { html: string; tocEntry: TocEntry | null } {
   const role = turn.role;
   const timestamp = formatTimestamp(turn.timestamp ?? "");
@@ -266,7 +267,7 @@ export function renderTurn(
 
   const turnId = `turn-${turnIndex}`;
   const contentHtml = blocksHtml.join("\n");
-  const label = role === "user" ? "You" : "Claude";
+  const label = role === "user" ? "You" : assistantLabel;
 
   // Show date when it changes from previous turn
   const curDate = dateKey(turn.timestamp ?? "");

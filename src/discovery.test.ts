@@ -887,17 +887,25 @@ describe("multi-root source attribution", () => {
     delete process.env.GLOSS_MACHINE_NAME;
   });
 
-  it("resolveProjectsRoots parses name=path pairs", () => {
+  it("resolveProjectsRoots parses name=path pairs (default format claude)", () => {
     const roots = resolveProjectsRoots({ GLOSS_PROJECTS_ROOTS: `studio=${rootA},mbp=${rootB}` });
     expect(roots).toEqual([
-      { source: "studio", path: rootA },
-      { source: "mbp", path: rootB },
+      { source: "studio", path: rootA, format: "claude" },
+      { source: "mbp", path: rootB, format: "claude" },
+    ]);
+  });
+
+  it("resolveProjectsRoots parses a label:format tag", () => {
+    const roots = resolveProjectsRoots({ GLOSS_PROJECTS_ROOTS: `studio=${rootA},codex-studio:codex=${rootB}` });
+    expect(roots).toEqual([
+      { source: "studio", path: rootA, format: "claude" },
+      { source: "codex-studio", path: rootB, format: "codex" },
     ]);
   });
 
   it("resolveProjectsRoots falls back to single default root with machine name", () => {
     const roots = resolveProjectsRoots({ GLOSS_PROJECTS_DIR: rootA, GLOSS_MACHINE_NAME: "mbp" });
-    expect(roots).toEqual([{ source: "mbp", path: rootA }]);
+    expect(roots).toEqual([{ source: "mbp", path: rootA, format: "claude" }]);
   });
 
 
@@ -1003,6 +1011,43 @@ describe("multi-root source attribution", () => {
       ]);
       const row = db.db.query("SELECT source_machine FROM sessions WHERE id = 's1'").get() as { source_machine: string };
       expect(row.source_machine).toBe("mbp");
+    } finally {
+      db.close();
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Codex-format root discovery", () => {
+  const codexFixtures = path.join(__dirname, "fixtures", "codex");
+
+  beforeEach(() => clearDiscoveryCache());
+  afterEach(() => clearDiscoveryCache());
+
+  it("scans a codex root: id from session_meta, project from cwd, format tag", () => {
+    const { sessions } = scanProjectsDir(codexFixtures, { format: "codex" });
+    const byId = Object.fromEntries(sessions.map((s) => [s.id, s]));
+    // session id comes from session_meta, NOT the rollout filename
+    const full = byId["new11111-0000-7000-8000-000000000002"];
+    expect(full).toBeDefined();
+    expect(full.format).toBe("codex");
+    expect(full.projectDir).toBe("/work/proj-beta"); // grouping by cwd, not date path
+    // old (2025) file with only payload.id still resolves
+    expect(byId["old00000-0000-7000-8000-000000000001"]).toBeDefined();
+  });
+
+  it("persists format=codex and cwd-derived project to the DB", () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "convo-codexdb-"));
+    const db = openDb(path.join(dbDir, "db.sqlite"));
+    try {
+      const { sessions } = scanProjectsDir(codexFixtures, { format: "codex" });
+      syncToDb(db, sessions.map((s) => ({ ...s, source: "codex-studio" })));
+      const row = db.db
+        .query("SELECT format, project, source_machine FROM sessions WHERE id = 'new11111-0000-7000-8000-000000000002'")
+        .get() as { format: string; project: string; source_machine: string };
+      expect(row.format).toBe("codex");
+      expect(row.project).toBe("/work/proj-beta");
+      expect(row.source_machine).toBe("codex-studio");
     } finally {
       db.close();
       fs.rmSync(dbDir, { recursive: true, force: true });

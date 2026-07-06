@@ -1,0 +1,4 @@
+{"timestamp": "2025-11-30T15:09:39.435Z", "type": "session_meta", "payload": {"id": "old00000-0000-7000-8000-000000000001", "timestamp": "2025-11-30T15:09:39.425Z", "cwd": "/work/proj-alpha", "originator": "codex_exec", "cli_version": "0.30.0", "instructions": "legacy system prompt", "source": "exec", "model_provider": "openai"}}
+{"timestamp": "2025-11-30T15:09:40.000Z", "type": "turn_context", "payload": {"model": "gpt-5-codex"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello from old format"}]}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]}}

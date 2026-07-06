@@ -5,7 +5,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import type { ConvoDb } from "./db.js";
-import { IncrementalParser } from "./incremental-parser.js";
+import { createConversationParser, assistantLabelFor } from "./parser-factory.js";
 import type { TextBlock } from "./types.js";
 
 const SUMMARY_TIMEOUT_MS = 20_000; // 20s — Haiku on ~3K chars should be 3-8s
@@ -141,9 +141,10 @@ export function buildExcerpt(jsonlPath: string): string | null {
     } else {
       content = fs.readFileSync(jsonlPath, "utf-8");
     }
-    const parser = new IncrementalParser();
+    const parser = createConversationParser();
     parser.feedLines(content.split("\n"));
     const turns = parser.getTurns();
+    const assistantLabel = assistantLabelFor(parser);
 
     if (turns.length === 0) return null;
 
@@ -157,7 +158,7 @@ export function buildExcerpt(jsonlPath: string): string | null {
     const parts: string[] = [];
     for (const i of [...indices].sort((a, b) => a - b)) {
       const turn = turns[i];
-      const role = turn.role === "user" ? "User" : "Claude";
+      const role = turn.role === "user" ? "User" : assistantLabel;
       const textBlocks = turn.blocks.filter((b): b is TextBlock => b.type === "text");
       let text = textBlocks.map((b) => b.text || "").join("\n").trim();
       if (text.length > MAX_TURN_CHARS) text = text.substring(0, MAX_TURN_CHARS) + "...";

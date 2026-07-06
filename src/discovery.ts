@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { IncrementalParser } from "./incremental-parser.js";
+import { createConversationParser, type ConversationFormat } from "./parser-factory.js";
+import { CodexParser } from "./codex-parser.js";
 import type { ConvoDb } from "./db.js";
 
 export interface DiscoveredSession {
@@ -16,12 +17,16 @@ export interface DiscoveredSession {
   hasParsedSessionId?: boolean;
   /** Which machine's logs this file belongs to (from the scan root). */
   source?: string;
+  /** Conversation format of this file's root ("claude" | "codex"). */
+  format?: ConversationFormat;
 }
 
 export interface ProjectsRoot {
   /** Source label persisted to sessions.source_machine (e.g. "mbp", "studio"). */
   source: string;
   path: string;
+  /** Conversation format for files under this root. Defaults to "claude". */
+  format: ConversationFormat;
 }
 
 /**
@@ -29,8 +34,11 @@ export interface ProjectsRoot {
  *
  * `GLOSS_PROJECTS_ROOTS="server=/path/a,laptop=/path/b"` defines multiple
  * roots with explicit source labels (a host serving its own logs plus synced
- * trees from other machines). Otherwise a single root: GLOSS_PROJECTS_DIR or
- * the default ~/.claude/projects, labeled GLOSS_MACHINE_NAME (default "local").
+ * trees from other machines). A label may carry a format tag as
+ * `label:format=path` (e.g. `codex-studio:codex=/Users/x/.codex/sessions`);
+ * the format defaults to "claude" when omitted. Otherwise a single root:
+ * GLOSS_PROJECTS_DIR or the default ~/.claude/projects, labeled
+ * GLOSS_MACHINE_NAME (default "local").
  */
 export function resolveProjectsRoots(
   env: Record<string, string | undefined> = process.env,
@@ -41,9 +49,15 @@ export function resolveProjectsRoots(
     for (const part of spec.split(",")) {
       const eq = part.indexOf("=");
       if (eq === -1) continue;
-      const source = part.slice(0, eq).trim();
+      const label = part.slice(0, eq).trim();
       const rootPath = part.slice(eq + 1).trim();
-      if (source && rootPath) roots.push({ source, path: rootPath });
+      // Optional format tag: "label:format". Source labels don't contain ':',
+      // and any ':' in the path sits after '=', so this split is unambiguous.
+      const colon = label.indexOf(":");
+      const source = colon === -1 ? label : label.slice(0, colon).trim();
+      const fmt = colon === -1 ? "" : label.slice(colon + 1).trim();
+      const format: ConversationFormat = fmt === "codex" ? "codex" : "claude";
+      if (source && rootPath) roots.push({ source, path: rootPath, format });
     }
     // Nested roots break attribution: the outer root's recursive scan finds
     // the inner root's files and tags them with the outer source. Siblings
@@ -67,6 +81,7 @@ export function resolveProjectsRoots(
   return [{
     source: env.GLOSS_MACHINE_NAME || "local",
     path: env.GLOSS_PROJECTS_DIR ?? path.join(os.homedir(), ".claude", "projects"),
+    format: "claude",
   }];
 }
 
@@ -187,8 +202,9 @@ function findJsonlFiles(dir: string): string[] {
  */
 export function scanProjectsDir(
   projectsDir?: string,
-  opts?: { collectAll?: boolean },
+  opts?: { collectAll?: boolean; format?: ConversationFormat },
 ): ScanResult {
+  const format: ConversationFormat = opts?.format ?? "claude";
   const dir = projectsDir
     ?? process.env.GLOSS_PROJECTS_DIR
     ?? path.join(os.homedir(), ".claude", "projects");
@@ -227,20 +243,30 @@ export function scanProjectsDir(
       // Take first ~50 lines from the snippet
       const lines = snippet.split("\n").slice(0, 50);
 
-      const parser = new IncrementalParser();
+      const parser = createConversationParser({ format });
       parser.feedLines(lines);
       const meta = parser.getMetadata();
 
-      const sessionId = meta.sessionId ?? path.parse(filePath).name;
+      // Codex rollouts carry the session id in the filename; recover it when
+      // the metadata line falls outside the 32KB window or the file is old.
+      let sessionId = meta.sessionId;
+      let startTime = meta.startTime;
+      if (format === "codex" && (!sessionId || !startTime)) {
+        const fallback = CodexParser.fromFilename(path.parse(filePath).name);
+        sessionId = sessionId ?? fallback.sessionId ?? null;
+        startTime = startTime ?? fallback.startTime ?? null;
+      }
+      const resolvedId = sessionId ?? path.parse(filePath).name;
       const session: DiscoveredSession = {
-        id: sessionId,
+        id: resolvedId,
         path: filePath,
         projectDir: meta.projectDir ?? undefined,
         model: meta.model ?? undefined,
-        startTime: meta.startTime ?? undefined,
+        startTime: startTime ?? undefined,
         lastModified: stat.mtimeMs,
         fileSize: stat.size,
-        hasParsedSessionId: meta.sessionId != null,
+        hasParsedSessionId: sessionId != null,
+        format,
       };
       discoveryCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, session });
       sessions.push(session);
@@ -292,7 +318,7 @@ export function scanAllProjects(
   let changedCount = 0;
 
   for (const root of resolved) {
-    const result = scanProjectsDir(root.path, opts);
+    const result = scanProjectsDir(root.path, { ...opts, format: root.format });
     changedCount += result.changedCount;
     const tagged = (opts?.collectAll ? result.allSessions ?? result.sessions : result.sessions)
       .map((s) => ({ ...s, source: root.source }));
@@ -326,6 +352,7 @@ export function syncToDb(
         jsonl_path: session.path,
         project: session.projectDir,
         source_machine: session.source,
+        format: session.format,
         model: session.model,
         start_time: session.startTime
           ? Math.floor(new Date(session.startTime).getTime() / 1000)
@@ -346,18 +373,22 @@ const ACCURATE_COUNT_LIMIT = 50 * 1024 * 1024;
  */
 function countTurnsAccurate(filePath: string): number {
   const content = fs.readFileSync(filePath, "utf-8");
-  const parser = new IncrementalParser();
+  const parser = createConversationParser();
   parser.feedLines(content.split("\n"));
   return parser.getTurns().length;
 }
 
 /**
  * Fast line-based turn estimate for large files.
- * Counts lines containing "type":"user" or "type":"assistant" in 1MB chunks.
- * Returns a raw message count (higher than actual turns due to merging).
- * Divides by 2 as a rough approximation since tool results inflate the count.
+ * Claude: counts "type":"user"/"assistant" message lines (÷4 for merge/fold).
+ * Codex: counts "role":"user"/"assistant" message items (each ≈ one turn;
+ * reasoning/tool items carry no role, so no divisor is needed).
  */
-function countTurnsFast(filePath: string): number {
+function countTurnsFast(filePath: string, format: ConversationFormat): number {
+  const markers = format === "codex"
+    ? ['"role":"user"', '"role":"assistant"']
+    : ['"type":"user"', '"type":"assistant"'];
+  const hit = (line: string) => markers.some((m) => line.includes(m));
   const CHUNK = 1024 * 1024;
   const fd = fs.openSync(filePath, "r");
   const buf = Buffer.alloc(CHUNK);
@@ -373,18 +404,16 @@ function countTurnsFast(filePath: string): number {
       const lines = text.split("\n");
       leftover = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.includes('"type":"user"') || line.includes('"type":"assistant"')) {
-          count++;
-        }
+        if (hit(line)) count++;
       }
       offset += bytesRead;
     }
-    if (leftover && (leftover.includes('"type":"user"') || leftover.includes('"type":"assistant"'))) {
-      count++;
-    }
+    if (leftover && hit(leftover)) count++;
   } finally {
     fs.closeSync(fd);
   }
+
+  if (format === "codex") return Math.max(1, count);
 
   // Raw line count is ~3-10x higher than actual turns due to tool result
   // folding and consecutive-role merging. Divide by 4 as rough estimate.
@@ -394,11 +423,11 @@ function countTurnsFast(filePath: string): number {
 /**
  * Count turns for a file, choosing accurate or fast method based on size.
  */
-function countTurns(filePath: string, fileSize: number): number {
+function countTurns(filePath: string, fileSize: number, format: ConversationFormat): number {
   if (fileSize <= ACCURATE_COUNT_LIMIT) {
     return countTurnsAccurate(filePath);
   }
-  return countTurnsFast(filePath);
+  return countTurnsFast(filePath, format);
 }
 
 /**
@@ -412,6 +441,7 @@ export function backfillTurnCounts(db: ConvoDb, onUpdated?: () => void): void {
     jsonl_path?: string | null;
     turn_count?: number | null;
     file_size?: number | null;
+    format?: string | null;
   }>;
 
   const needsCounting = sessions.filter((s) => {
@@ -442,7 +472,7 @@ export function backfillTurnCounts(db: ConvoDb, onUpdated?: () => void): void {
       try {
         const stat = fs.statSync(s.jsonl_path);
         if (!stat.isFile()) continue;
-        const turnCount = countTurns(s.jsonl_path, stat.size);
+        const turnCount = countTurns(s.jsonl_path, stat.size, s.format === "codex" ? "codex" : "claude");
         db.db.run("UPDATE sessions SET turn_count = ?, file_size = ? WHERE id = ?", [turnCount, stat.size, s.id]);
         counted++;
       } catch {
@@ -508,7 +538,7 @@ export function backfillFtsIndex(db: ConvoDb, onComplete?: () => void): void {
       const s = needsIndexing[i];
       try {
         const content = fs.readFileSync(s.jsonl_path, "utf-8");
-        const parser = new IncrementalParser();
+        const parser = createConversationParser();
         parser.feedLines(content.split("\n"));
         const turns = parser.getTurns();
 

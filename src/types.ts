@@ -77,6 +77,31 @@ export interface ConvoDataEntry {
   text: string[];
 }
 
+/** Per-turn delta emitted by a streaming parser as lines are fed. */
+export type TurnUpdate =
+  | { type: "new_turn"; turnIndex: number; turn: Turn }
+  | { type: "update_turn"; turnIndex: number; turn: Turn };
+
+/** Metadata a parser extracts from a conversation's header/first lines. */
+export interface ConversationMetadata {
+  sessionId: string | null;
+  projectDir: string | null;
+  model: string | null;
+  version: string | null;
+  startTime: string | null;
+}
+
+/**
+ * Common contract for a stateful conversation parser. Both the Claude
+ * `IncrementalParser` and the `CodexParser` implement this so discovery,
+ * rendering, FTS, and live-view can consume either format identically.
+ */
+export interface ConversationParser {
+  feedLines(lines: string[]): TurnUpdate[];
+  getTurns(): Turn[];
+  getMetadata(): ConversationMetadata;
+}
+
 /** Metadata embedded in rendered HTML files for index generation. */
 export interface ConvoMeta {
   session_id: string;

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import type { ConvoDb } from "./db.js";
-import { IncrementalParser } from "./incremental-parser.js";
+import { createConversationParser } from "./parser-factory.js";
 import type { Turn } from "./types.js";
 import type { EmbeddingEngine, VectorIndex } from "./embeddings.js";
 
@@ -405,7 +405,7 @@ export async function searchForSources(
     let allTurns: Turn[];
     try {
       const content = fs.readFileSync(session.jsonl_path, "utf-8");
-      const parser = new IncrementalParser();
+      const parser = createConversationParser();
       parser.feedLines(content.split("\n"));
       allTurns = parser.getTurns();
     } catch { continue; }

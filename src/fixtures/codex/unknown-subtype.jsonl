@@ -1,0 +1,5 @@
+{"timestamp": "2026-07-01T00:00:00.000Z", "type": "session_meta", "payload": {"session_id": "unk44444-0000-7000-8000-000000000005", "id": "unk44444-0000-7000-8000-000000000005", "timestamp": "2026-07-01T00:00:00.000Z", "cwd": "/work/proj-eps", "cli_version": "0.140.0", "model_provider": "openai"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "ghost_snapshot", "snapshot": "whatever"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "future_unknown_thing_9000", "foo": "bar"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}}

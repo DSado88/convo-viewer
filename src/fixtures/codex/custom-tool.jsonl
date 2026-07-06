@@ -1,0 +1,6 @@
+{"timestamp": "2026-03-26T21:37:30.000Z", "type": "session_meta", "payload": {"session_id": "cus33333-0000-7000-8000-000000000004", "id": "cus33333-0000-7000-8000-000000000004", "timestamp": "2026-03-26T21:37:30.000Z", "cwd": "/work/proj-delta", "cli_version": "0.130.0", "model_provider": "openai"}}
+{"timestamp": "2026-03-26T21:37:31.000Z", "type": "turn_context", "payload": {"model": "gpt-5.1-codex"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "create simple.txt"}]}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "custom_tool_call", "status": "completed", "call_id": "call_P", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: simple.txt\n+This is a simple text file.\n*** End Patch\n"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "call_P", "output": "{\"output\":\"Success. Updated the following files:\\nA simple.txt\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.0}}"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Created simple.txt."}]}}

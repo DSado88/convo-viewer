@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
-import { IncrementalParser } from "./incremental-parser.js";
+import { createConversationParser } from "./parser-factory.js";
 import type { ConvoDb } from "./db.js";
 import type { EmbeddingEngine, VectorIndex } from "./embeddings.js";
 import type { TextBlock } from "./types.js";
@@ -138,7 +138,7 @@ async function runBackfill(
 
     try {
       const content = fs.readFileSync(s.jsonl_path, "utf-8");
-      const parser = new IncrementalParser();
+      const parser = createConversationParser();
       parser.feedLines(content.split("\n"));
       const turns = parser.getTurns();
 

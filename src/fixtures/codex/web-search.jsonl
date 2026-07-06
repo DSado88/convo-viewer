@@ -1,0 +1,5 @@
+{"timestamp": "2025-12-11T10:54:40.000Z", "type": "session_meta", "payload": {"session_id": "web22222-0000-7000-8000-000000000003", "id": "web22222-0000-7000-8000-000000000003", "timestamp": "2025-12-11T10:54:40.000Z", "cwd": "/work/proj-gamma", "cli_version": "0.120.0", "model_provider": "openai"}}
+{"timestamp": "2025-12-11T10:54:41.000Z", "type": "turn_context", "payload": {"model": "gpt-5.1"}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "search the web for vitest snapshots"}]}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "web_search_call", "status": "completed", "action": {"type": "search", "query": "vitest snapshot testing"}}}
+{"timestamp": "2026-01-01T00:00:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Here is what I found."}]}}

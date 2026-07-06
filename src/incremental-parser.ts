@@ -1,9 +1,8 @@
-import type { Block, Turn } from "./types.js";
+import type { Block, Turn, ConversationParser, ConversationMetadata, TurnUpdate } from "./types.js";
 import { cleanUserText, isSystemNoise } from "./text-cleaning.js";
 
-export type TurnUpdate =
-  | { type: "new_turn"; turnIndex: number; turn: Turn }
-  | { type: "update_turn"; turnIndex: number; turn: Turn };
+// Re-exported for back-compat: TurnUpdate now lives in types.ts.
+export type { TurnUpdate } from "./types.js";
 
 /**
  * Stateful incremental parser for Claude Code JSONL conversations.
@@ -11,7 +10,7 @@ export type TurnUpdate =
  * Mirrors the exact parsing logic of `buildConversation()` but can be
  * fed lines incrementally, returning per-turn deltas.
  */
-export class IncrementalParser {
+export class IncrementalParser implements ConversationParser {
   private turns: Turn[] = [];
   private currentTurn: Turn | null = null;
   private sessionId: string | null = null;

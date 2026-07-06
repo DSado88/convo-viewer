@@ -31,10 +31,12 @@ export function buildPageParams(
     extraScript?: string;
     mode?: "inline" | "server";
     wsUrl?: string;
+    assistantLabel?: string;
   }
 ): HtmlPageParams {
   const includeThinking = options?.includeThinking ?? true;
   const includeTools = options?.includeTools ?? true;
+  const assistantLabel = options?.assistantLabel ?? "Claude";
 
   const sessionId = convo.sessionId || path.parse(inputPath).name;
 
@@ -49,7 +51,8 @@ export function buildPageParams(
       i,
       includeThinking,
       includeTools,
-      prevTs
+      prevTs,
+      assistantLabel
     );
     if (html) {
       turnsHtml.push(html);

@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { IncrementalParser } from "./incremental-parser.js";
+import { createConversationParser, assistantLabelFor } from "./parser-factory.js";
+import type { ConversationParser } from "./types.js";
 import { buildPageParams } from "./convert.js";
 import { buildHtmlPage, safeForScript } from "./templates/html-template.js";
 import { buildClientJs } from "./templates/client-js.js";
@@ -24,7 +25,7 @@ import type { ServerWebSocket } from "bun";
 
 interface SessionState {
   path: string;
-  parser: IncrementalParser;
+  parser: ConversationParser;
   byteOffset: number;
   partialLine: string;
   watcher: fs.FSWatcher | null;
@@ -67,13 +68,21 @@ export function getOrCreateSession(sessionId: string, jsonlPath: string): Sessio
   let state = sessions.get(sessionId);
   if (state) return state;
 
-  const parser = new IncrementalParser();
+  const parser = createConversationParser();
 
-  // Parse existing file content
+  // Parse existing file content. Hold an unterminated final line as the
+  // partial so a mid-write last line isn't fed as if complete (live-tail).
   let byteOffset = 0;
+  let partialLine = "";
   if (fs.existsSync(jsonlPath)) {
     const content = fs.readFileSync(jsonlPath, "utf-8");
-    parser.feedLines(content.split("\n"));
+    const lines = content.split("\n");
+    if (content.endsWith("\n")) {
+      lines.pop(); // trailing "" from the final newline
+    } else if (content.length > 0) {
+      partialLine = lines.pop() || ""; // unterminated tail — reconstruct on next read
+    }
+    parser.feedLines(lines);
     byteOffset = Buffer.byteLength(content, "utf-8");
   }
 
@@ -81,7 +90,7 @@ export function getOrCreateSession(sessionId: string, jsonlPath: string): Sessio
     path: jsonlPath,
     parser,
     byteOffset,
-    partialLine: "",
+    partialLine,
     watcher: null,
     pollTimer: null,
     clients: new Set(),
@@ -141,6 +150,7 @@ function processFileChanges(
   if (lines.length === 0) return;
 
   const updates = state.parser.feedLines(lines);
+  const assistantLabel = assistantLabelFor(state.parser);
 
   for (const update of updates) {
     const allTurns = state.parser.getTurns();
@@ -151,6 +161,7 @@ function processFileChanges(
       includeThinking,
       includeTools,
       prevTs,
+      assistantLabel,
     );
 
     // Skip broadcasting turns with no renderable content
@@ -703,17 +714,17 @@ export function createRequestHandler(deps: RequestHandlerDeps) {
         }
         try {
           const { renderMarkdownInline } = await import("./markdown.js");
-          const { IncrementalParser } = await import("./incremental-parser.js");
-          const parser = new IncrementalParser();
+          const parser = createConversationParser();
           const content = fs.readFileSync(session.jsonl_path, "utf-8");
           parser.feedLines(content.split("\n"));
           const turns = parser.getTurns();
+          const assistantLabel = assistantLabelFor(parser);
           // Get last 2 turns
           const lastTurns = turns.slice(-2);
           let html = "";
           for (const turn of lastTurns) {
             const role = turn.role ?? "assistant";
-            const label = role === "user" ? "You" : "Claude";
+            const label = role === "user" ? "You" : assistantLabel;
             const texts = turn.blocks
               .filter((b): b is import("./types.js").TextBlock => b.type === "text")
               .map((b) => b.text || "");
@@ -941,7 +952,7 @@ function renderConversationPage(
   }
 
   // Parse the full JSONL
-  const parser = new IncrementalParser();
+  const parser = createConversationParser();
   const content = fs.readFileSync(session.jsonl_path, "utf-8");
   const lines = content.split("\n");
   parser.feedLines(lines);
@@ -990,6 +1001,7 @@ function renderConversationPage(
     includeTools,
     mode: "server",
     wsUrl,
+    assistantLabel: session.format === "codex" ? "Codex" : "Claude",
   });
 
   // Pass custom title from DB if set
@@ -1173,7 +1185,7 @@ async function handleApiRouteInner(
     } catch {
       return new Response(JSON.stringify({ error: "Could not stat file" }), { status: 500, headers: jsonHeaders });
     }
-    const parser = new IncrementalParser();
+    const parser = createConversationParser();
     parser.feedLines(fs.readFileSync(session.jsonl_path, "utf-8").split("\n"));
     const allTurns = parser.getTurns();
 
