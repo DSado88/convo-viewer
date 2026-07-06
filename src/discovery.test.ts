@@ -1043,11 +1043,12 @@ describe("Codex-format root discovery", () => {
       const { sessions } = scanProjectsDir(codexFixtures, { format: "codex" });
       syncToDb(db, sessions.map((s) => ({ ...s, source: "codex-studio" })));
       const row = db.db
-        .query("SELECT format, project, source_machine FROM sessions WHERE id = 'new11111-0000-7000-8000-000000000002'")
-        .get() as { format: string; project: string; source_machine: string };
+        .query("SELECT format, project, source_machine, agent FROM sessions WHERE id = 'new11111-0000-7000-8000-000000000002'")
+        .get() as { format: string; project: string; source_machine: string; agent: string };
       expect(row.format).toBe("codex");
       expect(row.project).toBe("/work/proj-beta");
       expect(row.source_machine).toBe("codex-studio");
+      expect(row.agent).toBe("squall"); // originator captured as agent
     } finally {
       db.close();
       fs.rmSync(dbDir, { recursive: true, force: true });

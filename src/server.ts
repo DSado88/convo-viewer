@@ -1429,6 +1429,7 @@ async function handleApiRouteInner(
       project: s.project ?? "",
       title: s.title ?? "",
       source: s.source_machine ?? "",
+      agent: s.agent ?? "",
       model: s.model ?? "",
       turn_count: s.turn_count ?? 0,
       last_modified: s.last_modified ?? s.start_time ?? 0,

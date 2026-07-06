@@ -18,6 +18,7 @@ export class IncrementalParser implements ConversationParser {
   private model: string | null = null;
   private startTime: string | null = null;
   private version: string | null = null;
+  private agent: string | null = null;
 
   /**
    * Feed one or more raw JSONL lines (already split on "\n").
@@ -54,6 +55,9 @@ export class IncrementalParser implements ConversationParser {
       if (!this.version && obj.version) {
         const raw = obj.version;
         this.version = typeof raw === "string" ? raw : String(raw);
+      }
+      if (!this.agent && typeof obj.entrypoint === "string") {
+        this.agent = obj.entrypoint;
       }
 
       const msgType = obj.type as string | undefined;
@@ -233,19 +237,14 @@ export class IncrementalParser implements ConversationParser {
     return this.turns;
   }
 
-  getMetadata(): {
-    sessionId: string | null;
-    projectDir: string | null;
-    model: string | null;
-    version: string | null;
-    startTime: string | null;
-  } {
+  getMetadata(): ConversationMetadata {
     return {
       sessionId: this.sessionId,
       projectDir: this.projectDir,
       model: this.model,
       version: this.version,
       startTime: this.startTime,
+      agent: this.agent,
     };
   }
 }

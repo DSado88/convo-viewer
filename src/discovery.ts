@@ -19,6 +19,8 @@ export interface DiscoveredSession {
   source?: string;
   /** Conversation format of this file's root ("claude" | "codex"). */
   format?: ConversationFormat;
+  /** Launcher/agent (codex originator or claude entrypoint), e.g. "squall". */
+  agent?: string;
 }
 
 export interface ProjectsRoot {
@@ -271,6 +273,7 @@ export function scanProjectsDir(
         fileSize: stat.size,
         hasParsedSessionId: sessionId != null,
         format,
+        agent: meta.agent ?? undefined,
       };
       discoveryCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, session });
       sessions.push(session);
@@ -357,6 +360,7 @@ export function syncToDb(
         project: session.projectDir,
         source_machine: session.source,
         format: session.format,
+        agent: session.agent,
         model: session.model,
         start_time: session.startTime
           ? Math.floor(new Date(session.startTime).getTime() / 1000)

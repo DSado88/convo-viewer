@@ -68,6 +68,7 @@ export class CodexParser implements ConversationParser {
   private model: string | null = null;
   private version: string | null = null;
   private startTime: string | null = null;
+  private agent: string | null = null;
   /** Guard: at most one redacted-reasoning marker per assistant turn. */
   private turnHasRedacted = false;
   /** Diagnostic: counts of skipped/unrecognized response_item subtypes. */
@@ -95,6 +96,7 @@ export class CodexParser implements ConversationParser {
         if (sid && !this.sessionId) this.sessionId = String(sid);
         if (payload.cwd && !this.projectDir) this.projectDir = String(payload.cwd);
         if (payload.cli_version && !this.version) this.version = String(payload.cli_version);
+        if (typeof payload.originator === "string" && !this.agent) this.agent = payload.originator;
         if (!this.startTime && envTs) this.startTime = envTs;
         continue;
       }
@@ -207,6 +209,7 @@ export class CodexParser implements ConversationParser {
       model: this.model,
       version: this.version,
       startTime: this.startTime,
+      agent: this.agent,
     };
   }
 

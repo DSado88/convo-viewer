@@ -32,6 +32,26 @@ describe("CodexParser — metadata", () => {
     expect(m.model).toBe("gpt-5-codex");
     expect(m.startTime).toBe("2025-11-30T15:09:39.435Z");
   });
+
+  it("captures originator as the agent", () => {
+    expect(parse("old-id-only.jsonl").getMetadata().agent).toBe("codex_exec");
+  });
+
+  it("captures a squall originator override", () => {
+    const p = new CodexParser();
+    p.feedLines([
+      JSON.stringify({ type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "x", cwd: "/w", originator: "squall" } }),
+    ]);
+    expect(p.getMetadata().agent).toBe("squall");
+  });
+
+  it("ignores a non-string originator (no '[object Object]' garbage)", () => {
+    const p = new CodexParser();
+    p.feedLines([
+      JSON.stringify({ type: "session_meta", timestamp: "2026-01-01T00:00:00Z", payload: { id: "x", cwd: "/w", originator: { nested: "v" } } }),
+    ]);
+    expect(p.getMetadata().agent).toBeNull();
+  });
 });
 
 describe("CodexParser — turns & mapping", () => {

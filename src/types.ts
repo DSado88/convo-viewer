@@ -89,6 +89,12 @@ export interface ConversationMetadata {
   model: string | null;
   version: string | null;
   startTime: string | null;
+  /**
+   * Which launcher/agent produced the session. Codex: session_meta.originator
+   * (codex_exec, Codex Desktop, squall, …). Claude: root `entrypoint`
+   * (cli, sdk-cli, squall, …). Null when the field is absent.
+   */
+  agent: string | null;
 }
 
 /**

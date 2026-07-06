@@ -100,6 +100,22 @@ describe("IncrementalParser — live update scenarios", () => {
     expect(meta.projectDir).toBe("/home/user/project");
   });
 
+  it("captures entrypoint as the agent (e.g. squall-spawned claude)", () => {
+    const parser = new IncrementalParser();
+    parser.feedLines([
+      JSON.stringify({ type: "user", entrypoint: "squall", message: { content: "hi" }, timestamp: "2024-01-15T10:30:00Z" }),
+    ]);
+    expect(parser.getMetadata().agent).toBe("squall");
+  });
+
+  it("ignores a non-string entrypoint (no '[object Object]' garbage)", () => {
+    const parser = new IncrementalParser();
+    parser.feedLines([
+      JSON.stringify({ type: "user", entrypoint: { x: 1 }, message: { content: "hi" }, timestamp: "2024-01-15T10:30:00Z" }),
+    ]);
+    expect(parser.getMetadata().agent).toBeNull();
+  });
+
   it("simulates full live session: initial load then incremental appends", () => {
     const parser = new IncrementalParser();
 

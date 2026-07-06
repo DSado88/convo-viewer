@@ -90,6 +90,7 @@ export class StreamingConversationParser implements ConversationParser {
         model: null,
         version: null,
         startTime: null,
+        agent: null,
       }
     );
   }

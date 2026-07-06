@@ -372,6 +372,7 @@ export function buildServerIndex(sessions: SessionRecord[], settings?: { embeddi
         title: s.title ?? "",
         ...names,
         source: s.source_machine ?? "",
+        agent: s.agent ?? "",
         model: s.model ?? "",
         last_modified: s.last_modified ?? s.start_time ?? 0,
         turn_count: s.turn_count ?? 0,
@@ -544,7 +545,9 @@ export function buildServerIndex(sessions: SessionRecord[], settings?: { embeddi
   .s-session { display: flex; align-items: center; overflow: hidden; min-width: 0; flex-wrap: nowrap; }
   .s-title { font-size: 0.78rem; color: #5eead4; font-weight: 500; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .s-fts { font-size: 0.7rem; color: var(--accent); margin-left: 6px; opacity: 0.8; }
-  @media (prefers-color-scheme: light) { .s-title { color: #0f766e; } }
+  .s-agent { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; margin-left: 8px; padding: 1px 6px; border-radius: 4px; background: rgba(148,163,184,0.18); color: #94a3b8; vertical-align: middle; }
+  .s-agent-squall { background: rgba(168,85,247,0.22); color: #c084fc; }
+  @media (prefers-color-scheme: light) { .s-title { color: #0f766e; } .s-agent { color: #64748b; } .s-agent-squall { background: rgba(168,85,247,0.15); color: #9333ea; } }
   .s-time { font-size: 0.78rem; color: var(--text2); white-space: nowrap; }
   .s-turns { font-size: 0.78rem; color: var(--text2); text-align: right; }
   .s-size { font-size: 0.78rem; color: var(--text2); text-align: right; }
@@ -872,7 +875,7 @@ let sortDir = -1; // -1 = descending, 1 = ascending
 let showHidden = false;
 let minTurnsFilter = parseInt(localStorage.getItem('gloss_min_turns_filter') || '0', 10);
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function esc(s) { return (s == null ? '' : String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 function shortModel(m) {
   if (!m) return '';
@@ -993,7 +996,13 @@ function renderRecent(filtered) {
     html += '<span class="s-project" title="' + esc(s.fullProject) + '">' + proj + '</span>';
     const titleBit = s.title ? '<span class="s-title">' + esc(s.title) + '</span>' : '';
     const ftsBit = s._ftsMatch ? '<span class="s-fts">' + s._ftsMatch + ' matches</span>' : '';
-    html += '<span class="s-session"><span class="s-id" title="' + sid + '">' + truncateId(s.id) + '</span>' + titleBit + ftsBit + '</span>';
+    // Badge only distinctive launchers. Common interactive/SDK runs stay unbadged
+    // so a badge means something (squall reviews, desktop app, novel launchers).
+    const PLAIN_AGENTS = ['cli', 'sdk-cli', 'codex_exec', 'codex-tui', 'codex_cli_rs'];
+    const agentBit = (s.agent && PLAIN_AGENTS.indexOf(s.agent) === -1)
+      ? '<span class="s-agent' + (s.agent.indexOf('squall') === 0 ? ' s-agent-squall' : '') + '" title="launched by ' + esc(s.agent) + '">' + esc(s.agent) + '</span>'
+      : '';
+    html += '<span class="s-session"><span class="s-id" title="' + sid + '">' + truncateId(s.id) + '</span>' + agentBit + titleBit + ftsBit + '</span>';
     html += '<span class="s-time">' + fmtTime(s.last_modified) + '</span>';
     html += '<span class="s-turns">' + (s.turn_count || '—') + '</span>';
     html += '<span class="s-size">' + fmtSize(s.file_size) + '</span>';
