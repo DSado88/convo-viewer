@@ -1282,14 +1282,18 @@ function buildSourceChips() {
   for (const src of sources) {
     const on = !mutedSources.has(src);
     html += '<button class="view-btn' + (on ? ' active' : '') + '" data-source="' + esc(src) + '" ' +
-      'onclick="toggleSource(this.dataset.source)" title="' + counts.get(src) + ' sessions" ' +
+      'onclick="toggleSource(event, this.dataset.source)" title="' + counts.get(src) + ' sessions" ' +
       'style="padding:4px 8px;font-size:0.75rem">' +
       esc(src) + '</button>';
   }
   wrap.innerHTML = html;
 }
 
-function toggleSource(src) {
+function toggleSource(e, src) {
+  // Keep the Settings menu open while toggling. buildSourceChips() replaces the
+  // chip's DOM node mid-click, so the outside-click handler would otherwise see
+  // a detached target (closest() === null) and close the menu.
+  if (e) e.stopPropagation();
   if (mutedSources.has(src)) mutedSources.delete(src);
   else mutedSources.add(src);
   localStorage.setItem('gloss_muted_sources', JSON.stringify([...mutedSources]));
