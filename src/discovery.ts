@@ -230,11 +230,15 @@ export function scanProjectsDir(
       // File is new or modified — do the full read + parse
       changedCount++;
 
-      // Read only the first ~32KB for metadata extraction (avoids loading 200MB+ files)
+      // Read a header slice for metadata extraction (avoids loading 200MB+ files).
+      // Codex session_meta carries a base_instructions blob (~20KB+) on line 1,
+      // pushing turn_context (the model source) well past 32KB — use a larger
+      // window so the model is captured.
+      const metaCap = format === "codex" ? 262144 : 32768;
       const fd = fs.openSync(filePath, "r");
       let snippet: string;
       try {
-        const buf = Buffer.alloc(Math.min(32768, stat.size));
+        const buf = Buffer.alloc(Math.min(metaCap, stat.size));
         fs.readSync(fd, buf, 0, buf.length, 0);
         snippet = buf.toString("utf-8");
       } finally {
