@@ -4,6 +4,7 @@ import { createConversationParser } from "./parser-factory.js";
 import type { ConvoDb } from "./db.js";
 import type { EmbeddingEngine, VectorIndex } from "./embeddings.js";
 import type { TextBlock } from "./types.js";
+import { markPhaseSync } from "./loop-lag.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -140,7 +141,7 @@ async function runBackfill(
   maxBulkDeferMs: number,
   onProgress?: (indexed: number, total: number) => void,
 ): Promise<void> {
-  const sessions = db.listSessions({}) as Array<{
+  const sessions = markPhaseSync("embed-list-sessions", () => db.listSessions({})) as Array<{
     id: string;
     jsonl_path?: string | null;
     file_size?: number | null;
@@ -150,6 +151,7 @@ async function runBackfill(
   // Find sessions needing embedding — skip sessions below the turn threshold
   const threshold = minTurns > 0 ? minTurns : 3;
   const needsIndexing: Array<{ id: string; jsonl_path: string; mtimeMs: number; size: number }> = [];
+  markPhaseSync("embed-scan", () => {
   for (const s of sessions) {
     if (!s.jsonl_path) continue;
     if ((s.turn_count ?? 0) < threshold) continue;
@@ -163,6 +165,7 @@ async function runBackfill(
       continue;
     }
   }
+  });
 
   if (needsIndexing.length === 0) return;
 
@@ -182,9 +185,11 @@ async function runBackfill(
 
     try {
       const content = await fs.promises.readFile(s.jsonl_path, "utf-8");
-      const parser = createConversationParser();
-      parser.feedLines(content.split("\n"));
-      const turns = parser.getTurns();
+      const turns = markPhaseSync("embed-parse", () => {
+        const parser = createConversationParser();
+        parser.feedLines(content.split("\n"));
+        return parser.getTurns();
+      });
 
       // Extract text and filter empty turns
       const turnTexts: Array<{ index: number; role: string; text: string; hash: string }> = [];
@@ -230,17 +235,19 @@ async function runBackfill(
       }
 
       // Store in DB
-      db.storeEmbeddings(s.id, entries, s.mtimeMs, s.size);
+      markPhaseSync("embed-store", () => db.storeEmbeddings(s.id, entries, s.mtimeMs, s.size));
 
       // Update in-memory vector index
       if (vectorIndex) {
-        vectorIndex.addSession(
-          s.id,
-          entries.map((e) => ({
-            turnIndex: e.turnIndex,
-            role: e.role,
-            embedding: e.embedding,
-          })),
+        markPhaseSync("embed-index-update", () =>
+          vectorIndex.addSession(
+            s.id,
+            entries.map((e) => ({
+              turnIndex: e.turnIndex,
+              role: e.role,
+              embedding: e.embedding,
+            })),
+          ),
         );
       }
 

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import { createConversationParser, type ConversationFormat } from "./parser-factory.js";
 import { CodexParser } from "./codex-parser.js";
 import type { ConvoDb } from "./db.js";
+import { markPhaseSync } from "./loop-lag.js";
 
 export interface DiscoveredSession {
   id: string;
@@ -325,7 +326,9 @@ export function scanAllProjects(
   let changedCount = 0;
 
   for (const root of resolved) {
-    const result = scanProjectsDir(root.path, { ...opts, format: root.format });
+    const result = markPhaseSync(`scan:${root.source}`, () =>
+      scanProjectsDir(root.path, { ...opts, format: root.format }),
+    );
     changedCount += result.changedCount;
     const tagged = (opts?.collectAll ? result.allSessions ?? result.sessions : result.sessions)
       .map((s) => ({ ...s, source: root.source }));
@@ -352,6 +355,7 @@ export function syncToDb(
   db: ConvoDb,
   sessions: DiscoveredSession[],
 ): void {
+  markPhaseSync("sync-db", () => {
   db.transaction(() => {
     for (const session of sessions) {
       db.upsertSession({
@@ -369,6 +373,7 @@ export function syncToDb(
         file_size: session.fileSize,
       });
     }
+  });
   });
 }
 
@@ -452,7 +457,7 @@ export function backfillTurnCounts(db: ConvoDb, onUpdated?: () => void): void {
     format?: string | null;
   }>;
 
-  const needsCounting = sessions.filter((s) => {
+  const needsCounting = markPhaseSync("turn-count-scan", () => sessions.filter((s) => {
     if (!s.jsonl_path) return false;
     // Never counted (null = never processed; 0 = processed but had no turns)
     if (s.turn_count == null) return true;
@@ -464,7 +469,7 @@ export function backfillTurnCounts(db: ConvoDb, onUpdated?: () => void): void {
       return false;
     }
     return false;
-  });
+  }));
 
   if (needsCounting.length === 0) return;
 
@@ -517,19 +522,22 @@ export function backfillFtsIndex(db: ConvoDb, onComplete?: () => void): void {
   }>;
 
   // Check each session: needs indexing if never indexed or file changed since last index
-  const needsIndexing: Array<{ id: string; jsonl_path: string; mtimeMs: number; size: number }> = [];
-  for (const s of sessions) {
-    if (!s.jsonl_path) continue;
-    try {
-      const stat = fs.statSync(s.jsonl_path);
-      if (!stat.isFile() || stat.size > FTS_INDEX_LIMIT) continue;
-      if (db.ftsNeedsIndexing(s.id, stat.mtimeMs, stat.size)) {
-        needsIndexing.push({ id: s.id, jsonl_path: s.jsonl_path, mtimeMs: stat.mtimeMs, size: stat.size });
+  const needsIndexing = markPhaseSync("fts-scan", () => {
+    const pending: Array<{ id: string; jsonl_path: string; mtimeMs: number; size: number }> = [];
+    for (const s of sessions) {
+      if (!s.jsonl_path) continue;
+      try {
+        const stat = fs.statSync(s.jsonl_path);
+        if (!stat.isFile() || stat.size > FTS_INDEX_LIMIT) continue;
+        if (db.ftsNeedsIndexing(s.id, stat.mtimeMs, stat.size)) {
+          pending.push({ id: s.id, jsonl_path: s.jsonl_path, mtimeMs: stat.mtimeMs, size: stat.size });
+        }
+      } catch {
+        continue;
       }
-    } catch {
-      continue;
     }
-  }
+    return pending;
+  });
 
   if (needsIndexing.length === 0) {
     onComplete?.();
@@ -541,6 +549,7 @@ export function backfillFtsIndex(db: ConvoDb, onComplete?: () => void): void {
   let indexed = 0;
 
   const batch = () => {
+    markPhaseSync("fts-batch", () => {
     const end = Math.min(i + 3, needsIndexing.length);
     for (; i < end; i++) {
       const s = needsIndexing[i];
@@ -564,6 +573,7 @@ export function backfillFtsIndex(db: ConvoDb, onComplete?: () => void): void {
         // skip unreadable files
       }
     }
+    });
 
     if (i < needsIndexing.length) {
       setTimeout(batch, 10); // yield to event loop between batches
