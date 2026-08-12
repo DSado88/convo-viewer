@@ -18,6 +18,29 @@ export interface EmbeddingDb {
 // EmbeddingEngine — subprocess-only ONNX model inference
 // ---------------------------------------------------------------------------
 
+/** Minimal surface of the worker subprocess. Lets tests inject a fake. */
+export interface WorkerSubprocess {
+  stdin: { write(data: string): unknown };
+  stdout: {
+    getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }> };
+  };
+  exited: Promise<number>;
+  kill(): void;
+}
+
+export interface EmbeddingEngineOptions {
+  /** Override subprocess creation (tests). Defaults to spawning embedding-worker.ts. */
+  spawn?: () => WorkerSubprocess;
+  /** Deadline applied to embed requests that don't specify one. */
+  defaultTimeoutMs?: number;
+}
+
+/** Default deadline for a bulk embed batch. */
+const DEFAULT_EMBED_TIMEOUT_MS = 60_000;
+
+/** Deadline for an interactive query embedding — must beat MCP's 30s timeout. */
+const QUERY_EMBED_TIMEOUT_MS = 15_000;
+
 /**
  * Embedding engine that runs the ONNX model exclusively in a subprocess
  * (embedding-worker.ts) to avoid blocking the main event loop and to
@@ -32,16 +55,37 @@ export class EmbeddingEngine {
   private disabled = false;
 
   // Subprocess state
-  private subprocess: ReturnType<typeof Bun.spawn> | null = null;
+  private subprocess: WorkerSubprocess | null = null;
   private subprocessReady = false;
   private nextId = 1;
   private pending = new Map<
     number,
-    { resolve: (v: Float32Array[]) => void; reject: (e: Error) => void }
+    {
+      resolve: (v: Float32Array[]) => void;
+      reject: (e: Error) => void;
+      timer?: ReturnType<typeof setTimeout>;
+    }
   >();
   private stdoutBuffer = "";
+  private spawnFn: () => WorkerSubprocess;
+  private defaultTimeoutMs: number;
 
-  constructor() {
+  /**
+   * Interactive-work counter. While > 0, bulk backfill defers so an /ask
+   * query is not queued behind a stream of batch inference calls.
+   */
+  private bulkPauseDepth = 0;
+
+  constructor(options?: EmbeddingEngineOptions) {
+    this.defaultTimeoutMs = options?.defaultTimeoutMs ?? DEFAULT_EMBED_TIMEOUT_MS;
+    this.spawnFn = options?.spawn ?? (() => {
+      const workerPath = new URL("./embedding-worker.ts", import.meta.url).pathname;
+      return Bun.spawn(["bun", "run", workerPath], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "inherit",
+      }) as unknown as WorkerSubprocess;
+    });
     this.readyPromise = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
@@ -63,12 +107,7 @@ export class EmbeddingEngine {
 
   private _initSubprocess(): void {
     try {
-      const workerPath = new URL("./embedding-worker.ts", import.meta.url).pathname;
-      this.subprocess = Bun.spawn(["bun", "run", workerPath], {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "inherit",
-      });
+      this.subprocess = this.spawnFn();
 
       // Read stdout as text stream
       const reader = this.subprocess.stdout.getReader();
@@ -78,6 +117,7 @@ export class EmbeddingEngine {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            if (!value) continue;
             this.stdoutBuffer += decoder.decode(value, { stream: true });
             const lines = this.stdoutBuffer.split("\n");
             this.stdoutBuffer = lines.pop() || "";
@@ -101,6 +141,7 @@ export class EmbeddingEngine {
         }
         // Reject any pending requests
         for (const [, pending] of this.pending) {
+          if (pending.timer) clearTimeout(pending.timer);
           pending.reject(new Error("Embedding subprocess exited"));
         }
         this.pending.clear();
@@ -139,6 +180,7 @@ export class EmbeddingEngine {
     const pending = this.pending.get(msg.id);
     if (!pending) return;
     this.pending.delete(msg.id);
+    if (pending.timer) clearTimeout(pending.timer);
 
     if (msg.error) {
       pending.reject(new Error(msg.error));
@@ -166,19 +208,57 @@ export class EmbeddingEngine {
   }
 
   /**
+   * Pause bulk (backfill) embedding while interactive work is in flight.
+   * Nested — every pauseBulk() needs a matching resumeBulk().
+   */
+  pauseBulk(): void {
+    this.bulkPauseDepth++;
+  }
+
+  /** Release one pause. Never drops below zero on unbalanced calls. */
+  resumeBulk(): void {
+    if (this.bulkPauseDepth > 0) this.bulkPauseDepth--;
+  }
+
+  /** True while interactive work wants the worker to itself. */
+  isBulkPaused(): boolean {
+    return this.bulkPauseDepth > 0;
+  }
+
+  /** Number of in-flight embed requests. @internal exported for testing. */
+  pendingCount(): number {
+    return this.pending.size;
+  }
+
+  /**
    * Embed texts off the main thread via the subprocess.
    * Returns array of Float32Array(256).
+   *
+   * Always bounded by a deadline: a worker that stalls silently would
+   * otherwise leave this promise pending forever and hang the caller.
    */
-  async embedOffThread(texts: string[]): Promise<Float32Array[]> {
+  async embedOffThread(
+    texts: string[],
+    options?: { timeoutMs?: number },
+  ): Promise<Float32Array[]> {
     if (texts.length === 0) return [];
     if (this.subprocess && this.subprocessReady) {
       const id = this.nextId++;
+      const timeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs;
       const promise = new Promise<Float32Array[]>((resolve, reject) => {
-        this.pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`Embedding request timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        // Don't keep the process alive just for this deadline
+        (timer as { unref?: () => void }).unref?.();
+        this.pending.set(id, { resolve, reject, timer });
       });
       try {
         this.subprocess.stdin.write(JSON.stringify({ id, texts }) + "\n");
       } catch (err) {
+        const entry = this.pending.get(id);
+        if (entry?.timer) clearTimeout(entry.timer);
         this.pending.delete(id);
         this.subprocessReady = false;
         throw new Error("Embedding subprocess stdin write failed");
@@ -192,9 +272,14 @@ export class EmbeddingEngine {
    * Embed a single query string. Applies the "query: " prefix
    * required by snowflake-arctic-embed for asymmetric retrieval.
    */
-  async embedQuery(query: string): Promise<Float32Array> {
+  async embedQuery(
+    query: string,
+    options?: { timeoutMs?: number },
+  ): Promise<Float32Array> {
     if (!this.loaded) throw new Error("Embedding engine not ready");
-    const results = await this.embedOffThread([`query: ${query}`]);
+    const results = await this.embedOffThread([`query: ${query}`], {
+      timeoutMs: options?.timeoutMs ?? QUERY_EMBED_TIMEOUT_MS,
+    });
     return results[0];
   }
 
@@ -259,16 +344,39 @@ export interface VectorSearchResult {
 // VectorIndex — in-memory brute-force cosine search
 // ---------------------------------------------------------------------------
 
+/** Smallest slot capacity to allocate when the index first grows. */
+const MIN_CAPACITY = 64;
+
+/** Compact only once dead slots outnumber live ones by this much. */
+const COMPACT_MIN_DEAD = 8;
+
 /**
  * In-memory vector index for fast cosine similarity search.
  * Stores all embeddings in flat typed arrays for cache-friendly scanning.
+ *
+ * Updates are incremental: removals tombstone their slots and additions
+ * append into spare capacity, so re-indexing one session costs O(session
+ * turns) instead of copying the entire N×256 buffer. Dead slots are
+ * reclaimed by an occasional compaction, not on every write.
  */
 export class VectorIndex {
   private sessionIds: string[];
   private turnIndices: number[];
   private roles: string[];
-  private vectors: Float32Array; // flat buffer: N × 256
-  private _count: number;
+  private vectors: Float32Array; // flat buffer: capacity × 256
+  private alive: Uint8Array; // 1 = live, 0 = tombstoned
+  private slots: number; // used slots, live + dead
+  private capacity: number; // allocated slots
+  private _count: number; // live vectors
+  private deadSlots = 0;
+  /**
+   * sessionId → its slots. Built on first mutation, not at load: startup
+   * only ever searches, and building it for the whole corpus costs more
+   * than the flatten itself.
+   */
+  private sessionSlots: Map<string, number[]> | null = null;
+  private growths = 0;
+  private compactions = 0;
 
   private constructor(
     sessionIds: string[],
@@ -281,12 +389,48 @@ export class VectorIndex {
     this.turnIndices = turnIndices;
     this.roles = roles;
     this.vectors = vectors;
+    this.slots = count;
+    this.capacity = count;
     this._count = count;
+    this.alive = new Uint8Array(count).fill(1);
   }
 
-  /** Number of vectors in the index. */
+  /** Session→slot index, built on demand. */
+  private slotIndex(): Map<string, number[]> {
+    if (this.sessionSlots) return this.sessionSlots;
+    const map = new Map<string, number[]>();
+    for (let i = 0; i < this.slots; i++) {
+      if (!this.alive[i]) continue;
+      const list = map.get(this.sessionIds[i]);
+      if (list) list.push(i);
+      else map.set(this.sessionIds[i], [i]);
+    }
+    this.sessionSlots = map;
+    return map;
+  }
+
+  /** Number of live vectors in the index. */
   get count(): number {
     return this._count;
+  }
+
+  /** Buffer bookkeeping. @internal exported for testing. */
+  stats(): {
+    live: number;
+    slots: number;
+    capacity: number;
+    deadSlots: number;
+    growths: number;
+    compactions: number;
+  } {
+    return {
+      live: this._count,
+      slots: this.slots,
+      capacity: this.capacity,
+      deadSlots: this.deadSlots,
+      growths: this.growths,
+      compactions: this.compactions,
+    };
   }
 
   /** Load all embeddings from the database into memory. */
@@ -307,37 +451,81 @@ export class VectorIndex {
     );
   }
 
+  /** Grow the backing buffer geometrically so appends stay amortized O(1). */
+  private ensureCapacity(needed: number): void {
+    if (needed <= this.capacity) return;
+    let next = Math.max(this.capacity * 2, MIN_CAPACITY);
+    while (next < needed) next *= 2;
+
+    const grown = new Float32Array(next * EMBEDDING_DIMS);
+    grown.set(this.vectors.subarray(0, this.slots * EMBEDDING_DIMS));
+    const aliveGrown = new Uint8Array(next);
+    aliveGrown.set(this.alive.subarray(0, this.slots));
+
+    this.vectors = grown;
+    this.alive = aliveGrown;
+    this.capacity = next;
+    this.growths++;
+  }
+
+  /** Drop tombstoned slots. Only worth doing when they dominate the buffer. */
+  private maybeCompact(): void {
+    if (this.deadSlots < COMPACT_MIN_DEAD) return;
+    if (this.deadSlots <= this._count) return;
+
+    const live = this._count;
+    const capacity = Math.max(live * 2, MIN_CAPACITY);
+    const vectors = new Float32Array(capacity * EMBEDDING_DIMS);
+    const alive = new Uint8Array(capacity);
+    const sessionIds: string[] = [];
+    const turnIndices: number[] = [];
+    const roles: string[] = [];
+    const sessionSlots = new Map<string, number[]>();
+
+    let j = 0;
+    for (let i = 0; i < this.slots; i++) {
+      if (!this.alive[i]) continue;
+      const sessionId = this.sessionIds[i];
+      sessionIds.push(sessionId);
+      turnIndices.push(this.turnIndices[i]);
+      roles.push(this.roles[i]);
+      vectors.set(
+        this.vectors.subarray(i * EMBEDDING_DIMS, (i + 1) * EMBEDDING_DIMS),
+        j * EMBEDDING_DIMS,
+      );
+      alive[j] = 1;
+      const list = sessionSlots.get(sessionId);
+      if (list) list.push(j);
+      else sessionSlots.set(sessionId, [j]);
+      j++;
+    }
+
+    this.sessionIds = sessionIds;
+    this.turnIndices = turnIndices;
+    this.roles = roles;
+    this.vectors = vectors;
+    this.alive = alive;
+    this.sessionSlots = sessionSlots;
+    this.slots = j;
+    this.capacity = capacity;
+    this.deadSlots = 0;
+    this.compactions++;
+  }
+
   /** Remove all vectors for a session (used before re-indexing). */
   removeSession(sessionId: string): void {
-    // Find indices to keep (everything except this session)
-    const keepIndices: number[] = [];
-    for (let i = 0; i < this._count; i++) {
-      if (this.sessionIds[i] !== sessionId) {
-        keepIndices.push(i);
-      }
+    const index = this.slotIndex();
+    const slots = index.get(sessionId);
+    if (!slots || slots.length === 0) return;
+
+    for (const slot of slots) {
+      if (!this.alive[slot]) continue;
+      this.alive[slot] = 0;
+      this._count--;
+      this.deadSlots++;
     }
-    if (keepIndices.length === this._count) return; // nothing to remove
-
-    const newCount = keepIndices.length;
-    const newVectors = new Float32Array(newCount * EMBEDDING_DIMS);
-    const newSessionIds: string[] = [];
-    const newTurnIndices: number[] = [];
-    const newRoles: string[] = [];
-
-    for (let j = 0; j < keepIndices.length; j++) {
-      const i = keepIndices[j];
-      newSessionIds.push(this.sessionIds[i]);
-      newTurnIndices.push(this.turnIndices[i]);
-      newRoles.push(this.roles[i]);
-      const src = this.vectors.subarray(i * EMBEDDING_DIMS, (i + 1) * EMBEDDING_DIMS);
-      newVectors.set(src, j * EMBEDDING_DIMS);
-    }
-
-    this.sessionIds = newSessionIds;
-    this.turnIndices = newTurnIndices;
-    this.roles = newRoles;
-    this.vectors = newVectors;
-    this._count = newCount;
+    index.delete(sessionId);
+    this.maybeCompact();
   }
 
   /** Add vectors for a newly-indexed session (removes stale vectors first). */
@@ -353,20 +541,23 @@ export class VectorIndex {
     this.removeSession(sessionId);
     if (entries.length === 0) return;
 
-    const newCount = this._count + entries.length;
-    const newVectors = new Float32Array(newCount * EMBEDDING_DIMS);
-    newVectors.set(this.vectors);
+    this.ensureCapacity(this.slots + entries.length);
 
+    const slots: number[] = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
-      this.sessionIds.push(sessionId);
-      this.turnIndices.push(entry.turnIndex);
-      this.roles.push(entry.role);
-      newVectors.set(entry.embedding, (this._count + i) * EMBEDDING_DIMS);
+      const slot = this.slots + i;
+      this.sessionIds[slot] = sessionId;
+      this.turnIndices[slot] = entry.turnIndex;
+      this.roles[slot] = entry.role;
+      this.vectors.set(entry.embedding, slot * EMBEDDING_DIMS);
+      this.alive[slot] = 1;
+      slots.push(slot);
     }
 
-    this.vectors = newVectors;
-    this._count = newCount;
+    this.slots += entries.length;
+    this._count += entries.length;
+    this.slotIndex().set(sessionId, slots);
   }
 
   /**
@@ -378,7 +569,8 @@ export class VectorIndex {
 
     // Score all vectors (vectors are pre-normalized, so dot = cosine sim)
     const scores: Array<{ idx: number; score: number }> = [];
-    for (let i = 0; i < this._count; i++) {
+    for (let i = 0; i < this.slots; i++) {
+      if (!this.alive[i]) continue;
       const offset = i * EMBEDDING_DIMS;
       const vec = this.vectors.subarray(offset, offset + EMBEDDING_DIMS);
       const score = dot(queryVector, vec);
@@ -420,7 +612,8 @@ export class VectorIndex {
       { bestScore: number; bestTurnIndex: number; matchCount: number }
     >();
 
-    for (let i = 0; i < this._count; i++) {
+    for (let i = 0; i < this.slots; i++) {
+      if (!this.alive[i]) continue;
       const offset = i * EMBEDDING_DIMS;
       const vec = this.vectors.subarray(offset, offset + EMBEDDING_DIMS);
       const score = dot(queryVector, vec);

@@ -42,8 +42,39 @@ function textHash(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
 
+/** ms to wait between checks while interactive work holds the worker. */
+const PAUSE_POLL_MS = 100;
+
+/**
+ * Longest a backfill will defer to interactive work before proceeding anyway.
+ * A pause is only ever released in a `finally`, but if bookkeeping ever leaks
+ * one, indexing must degrade to "slow", not "silently stopped forever".
+ */
+const MAX_BULK_DEFER_MS = 60_000;
+
 /** Sleep helper that actually yields to the event loop. */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Stand down while an interactive query is using the embedding worker.
+ * Backfill and /ask share one subprocess; batch work always defers — but
+ * only up to `maxDeferMs`, so a leaked pause cannot wedge indexing.
+ */
+async function awaitBulkResume(
+  engine: EmbeddingEngine,
+  maxDeferMs: number,
+): Promise<void> {
+  const deadline = Date.now() + maxDeferMs;
+  while (engine.isBulkPaused?.()) {
+    if (Date.now() >= deadline) {
+      console.warn(
+        `[embeddings] Bulk pause held ${maxDeferMs}ms — proceeding with backfill anyway`,
+      );
+      return;
+    }
+    await sleep(PAUSE_POLL_MS);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Background embedding indexer
@@ -64,6 +95,7 @@ export function backfillEmbeddings(
   options?: {
     batchSize?: number;
     minTurns?: number;
+    maxBulkDeferMs?: number;
     onProgress?: (indexed: number, total: number) => void;
   },
 ): void {
@@ -82,7 +114,15 @@ export function backfillEmbeddings(
   // Kick off the async loop
   (async () => {
     try {
-      await runBackfill(db, engine, vectorIndex, batchSize, options?.minTurns ?? 3, options?.onProgress);
+      await runBackfill(
+        db,
+        engine,
+        vectorIndex,
+        batchSize,
+        options?.minTurns ?? 3,
+        options?.maxBulkDeferMs ?? MAX_BULK_DEFER_MS,
+        options?.onProgress,
+      );
     } catch (err) {
       console.error("[embeddings] Backfill crashed:", err);
     } finally {
@@ -97,6 +137,7 @@ async function runBackfill(
   vectorIndex: VectorIndex | null,
   batchSize: number,
   minTurns: number,
+  maxBulkDeferMs: number,
   onProgress?: (indexed: number, total: number) => void,
 ): Promise<void> {
   const sessions = db.listSessions({}) as Array<{
@@ -136,8 +177,11 @@ async function runBackfill(
   for (let cursor = 0; cursor < needsIndexing.length; cursor++) {
     const s = needsIndexing[cursor];
 
+    // Never start a session's work while an ask is in flight.
+    await awaitBulkResume(engine, maxBulkDeferMs);
+
     try {
-      const content = fs.readFileSync(s.jsonl_path, "utf-8");
+      const content = await fs.promises.readFile(s.jsonl_path, "utf-8");
       const parser = createConversationParser();
       parser.feedLines(content.split("\n"));
       const turns = parser.getTurns();
@@ -167,6 +211,9 @@ async function runBackfill(
       }> = [];
 
       for (let b = 0; b < turnTexts.length; b += batchSize) {
+        // Re-check between batches so a query arriving mid-session waits at
+        // most one batch, not the rest of the file.
+        await awaitBulkResume(engine, maxBulkDeferMs);
         const batch = turnTexts.slice(b, b + batchSize);
         const texts = batch.map((t) => t.text);
         const embeddings = await engine.embedOffThread(texts);

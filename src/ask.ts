@@ -207,8 +207,20 @@ function extractLocalTerms(query: string, ftsTokens: string[]): string[] {
 // Main pipeline
 // ---------------------------------------------------------------------------
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200 MB
+/**
+ * Per-file ceiling for a source conversation. Reading and parsing a JSONL
+ * happens on the single JS thread, so this bounds how long one source can
+ * hold the event loop hostage. Anything larger is skipped, not truncated.
+ */
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
+
+/** Cumulative read budget across all sources for one query. */
+const MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024; // 64 MB
+
 const CLAUDE_TIMEOUT_MS = 60_000;
+
+/** Hand the event loop back so queued HTTP requests get served. */
+const yieldToEventLoop = () => new Promise<void>((r) => setTimeout(r, 0));
 
 // ---------------------------------------------------------------------------
 // Session metadata search (step 1)
@@ -254,6 +266,10 @@ interface AskSearchOptions {
   contextTurns?: number;
   vectorIndex?: VectorIndex;
   embeddingEngine?: EmbeddingEngine;
+  /** Skip any single source file larger than this. */
+  maxSourceBytes?: number;
+  /** Stop loading sources once this many bytes have been read for one query. */
+  maxTotalSourceBytes?: number;
 }
 
 interface SearchPhaseResult {
@@ -262,7 +278,27 @@ interface SearchPhaseResult {
   timing: { ftsMs: number; vectorMs: number };
 }
 
+/**
+ * Retrieve and rank source conversations for a query.
+ *
+ * Bulk embedding backfill is paused for the duration: both share one worker
+ * subprocess, and an interactive query should not queue behind batch work.
+ */
 export async function searchForSources(
+  db: ConvoDb,
+  query: string,
+  options?: AskSearchOptions,
+): Promise<SearchPhaseResult> {
+  const engine = options?.embeddingEngine;
+  engine?.pauseBulk();
+  try {
+    return await searchForSourcesInner(db, query, options);
+  } finally {
+    engine?.resumeBulk();
+  }
+}
+
+async function searchForSourcesInner(
   db: ConvoDb,
   query: string,
   options?: AskSearchOptions,
@@ -393,22 +429,39 @@ export async function searchForSources(
   // 4. Load turn context
   // ------------------------------------------------------------------
   const sources: AskSource[] = [];
+  const maxSourceBytes = options?.maxSourceBytes ?? MAX_FILE_SIZE;
+  const maxTotalSourceBytes = options?.maxTotalSourceBytes ?? MAX_TOTAL_SOURCE_BYTES;
+  let bytesRead = 0;
+  let sessionsLoaded = 0;
 
   for (const sessionId of finalSessionIds) {
+    if (sessionsLoaded > 0 && bytesRead >= maxTotalSourceBytes) {
+      console.log(`[ask] Source budget spent (${bytesRead} bytes) — skipping remaining sessions`);
+      break;
+    }
+
     const session = db.getSession(sessionId);
     if (!session?.jsonl_path) continue;
 
     let stat: fs.Stats;
-    try { stat = fs.statSync(session.jsonl_path); } catch { continue; }
-    if (stat.size > MAX_FILE_SIZE) continue;
+    try { stat = await fs.promises.stat(session.jsonl_path); } catch { continue; }
+    if (stat.size > maxSourceBytes) continue;
+    // The budget never suppresses the top-ranked source — a single large
+    // conversation should still answer the question, just not drag 14 more in.
+    if (sessionsLoaded > 0 && bytesRead + stat.size > maxTotalSourceBytes) continue;
 
     let allTurns: Turn[];
     try {
-      const content = fs.readFileSync(session.jsonl_path, "utf-8");
+      const content = await fs.promises.readFile(session.jsonl_path, "utf-8");
+      bytesRead += stat.size;
+      sessionsLoaded++;
       const parser = createConversationParser();
       parser.feedLines(content.split("\n"));
       allTurns = parser.getTurns();
     } catch { continue; }
+
+    // Parsing a conversation is CPU-bound; let other requests through.
+    await yieldToEventLoop();
 
     const matchingIndices: number[] = [];
     const vecHint = vectorTurnHints.get(sessionId);
